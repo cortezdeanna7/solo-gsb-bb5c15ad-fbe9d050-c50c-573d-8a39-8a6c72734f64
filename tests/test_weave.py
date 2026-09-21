@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.weave import (  # noqa: E402
     DesignError,
+    align_matrices,
     analyze_repeat_period,
     audit_floats,
     build_interlacing,
@@ -412,6 +413,70 @@ def test_repair_plans_limit_and_validation():
     print("  ok: repair plan parameter validation")
 
 
+def test_align_matrices_unique_offset():
+    # reference 的 1 在 (0,0) (1,1) (2,2)；candidate 为其向下 1 行、
+    # 向右 2 列的循环平移，唯一零错位对齐为偏移 (2, 2)
+    reference = [[1, 0, 0, 0],
+                 [0, 1, 0, 0],
+                 [0, 0, 1, 0]]
+    candidate = [[1, 0, 0, 0],
+                 [0, 0, 1, 0],
+                 [0, 0, 0, 1]]
+    result = align_matrices(reference, candidate)
+    check((result.row_offset, result.col_offset) == (2, 2),
+          "unique best offset (2, 2)")
+    check(result.mismatches == 0 and result.mismatch_ratio == 0.0,
+          "perfect alignment: no mismatches")
+    check(result.mismatch_cells == []
+          and result.row_mismatches == [0, 0, 0]
+          and result.col_mismatches == [0, 0, 0, 0],
+          "perfect alignment: empty cells and zero summaries")
+    check(result.aligned_interlacing == reference,
+          "aligned candidate reproduces reference")
+    check(result.warp_ends == 4 and result.weft_picks == 3,
+          "dimensions reported")
+    check(candidate == [[1, 0, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+          and reference == [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]],
+          "input matrices unchanged")
+
+
+def test_align_matrices_tie_break():
+    # (0,1) 与 (1,0) 都零错位：平局按行偏移再列偏移升序，取 (0,1)
+    reference = [[1, 0], [0, 1]]
+    candidate = [[0, 1], [1, 0]]
+    result = align_matrices(reference, candidate)
+    check(result.mismatches == 0, "tie: zero-mismatch alignments exist")
+    check((result.row_offset, result.col_offset) == (0, 1),
+          "tie broken by smallest row then col offset")
+
+
+def test_align_matrices_mismatch_details():
+    # candidate 比 reference 少一个 1：任何对齐至少 1 处错位，(0,0) 即最优
+    reference = [[1, 0], [0, 1]]
+    one_off = [[1, 0], [0, 0]]
+    result = align_matrices(reference, one_off)
+    check((result.row_offset, result.col_offset) == (0, 0),
+          "single diff: offset (0, 0)")
+    check(result.mismatches == 1 and result.mismatch_ratio == 0.25,
+          "single diff: count 1 and ratio 1/4")
+    check([c.to_dict() for c in result.mismatch_cells] == [{"row": 1, "col": 1}],
+          "single diff: coordinate (1, 1)")
+    check(result.row_mismatches == [0, 1] and result.col_mismatches == [0, 1],
+          "single diff: row/col summaries")
+    check(result.aligned_interlacing == one_off,
+          "offset (0, 0): aligned matrix is the candidate itself")
+
+
+def test_align_matrices_size_mismatch():
+    for candidate in ([[1, 0, 1]], [[1, 0]], [[1], [0], [1]]):
+        try:
+            align_matrices([[1, 0], [0, 1]], candidate)
+            raise AssertionError(f"{candidate} should be rejected")
+        except DesignError:
+            pass
+    print("  ok: mismatched dimensions raise DesignError")
+
+
 def test_validation():
     ok_cases = []
     # 维度不一致：绑综矩阵不是矩形
@@ -472,5 +537,9 @@ if __name__ == "__main__":
     test_repair_plans_two_flips_needed()
     test_repair_plans_state_dedup()
     test_repair_plans_limit_and_validation()
+    test_align_matrices_unique_offset()
+    test_align_matrices_tie_break()
+    test_align_matrices_mismatch_details()
+    test_align_matrices_size_mismatch()
     test_validation()
     print("all tests passed")

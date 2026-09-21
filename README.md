@@ -9,7 +9,9 @@
 正周期与循环单元。对超限设计，还可请求
 **单步绑综修复建议**：逐一翻转一个绑综单元重跑审计，给出违规减少的候选；
 以及**多步修复方案搜索**：在 1～3 次绑综翻转内搜索最终违规严格减少的方案
-（中间状态允许违规数不下降）。
+（中间状态允许违规数不下降）。此外支持**设计对齐比对**：枚举第二份设计的
+交织矩阵在经、纬方向的所有循环错位，找出与基准设计不一致单元最少的对齐
+结果。
 
 ## 快速启动
 
@@ -91,6 +93,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `GET` | `/designs/{id}/repeat-period` | 最小循环单元分析：基于交织矩阵求经纬最小正周期与循环单元 |
 | `POST` | `/designs/{id}/tie-up-suggestions` | 单步绑综修复建议：逐一翻转一个绑综单元重跑审计，返回违规减少的候选 |
 | `POST` | `/designs/{id}/repair-plans` | 多步绑综修复方案：1～3 次翻转内搜索最终违规严格减少的方案，支持 `max_changes`、`limit` |
+| `POST` | `/designs/{id}/compare` | 设计对齐比对：枚举另一份设计交织矩阵的经纬循环错位，返回不一致单元最少的对齐结果 |
 | `GET` | `/health` | 健康检查 |
 
 ### 示例：提交设计
@@ -303,6 +306,74 @@ curl -s -X POST 'http://localhost:8000/designs/2/repair-plans?max_changes=3&limi
 ]
 ```
 
+### 设计对齐比对
+
+`POST http://localhost:8000/designs/{id}/compare`：读取两份已入库设计并重新
+生成**交织矩阵**（要求行数、列数都一致），枚举第二份矩阵在**纬向（行）与
+经向（列）的所有循环错位**，返回与基准矩阵不一致单元最少的对齐结果。
+接口只读计算，**不修改任何已存设计**；任一设计不存在返回 404，两份矩阵
+尺寸不一致返回 400。
+
+请求体：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `other_design_id` | `int` | 另一份已入库设计的 ID（其矩阵被循环平移比对） |
+
+对齐规则：
+
+- 偏移 `(row_offset, col_offset)` 表示把第二份矩阵整体**向下、向右**循环
+  平移的量：`aligned[h][w] = other[(h - row_offset) % weft_picks][(w - col_offset) % warp_ends]`；
+- 行偏移取 `0..weft_picks-1`、列偏移取 `0..warp_ends-1` 的全部组合逐一比较，
+  **不一致单元数最少**者胜出；
+- 平局按**行偏移再列偏移升序**（即枚举顺序中最先达到最小错位数者）。
+
+返回字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `design_id` / `other_design_id` | 基准设计 / 被平移比对的设计 ID |
+| `warp_ends` / `weft_picks` | 两份矩阵的列数（经纱数）/ 行数（纬纱数） |
+| `row_offset` / `col_offset` | 最佳行偏移（纬向错位）/ 最佳列偏移（经向错位） |
+| `mismatches` | 最佳对齐下的不一致单元数 |
+| `mismatch_ratio` | 不一致单元占比：`mismatches / (weft_picks × warp_ends)` |
+| `mismatch_cells[]` | 不一致单元坐标 `{"row", "col"}`，按行、列升序 |
+| `row_mismatches[]` | 按行汇总的不一致单元数（长度 = `weft_picks`） |
+| `col_mismatches[]` | 按列汇总的不一致单元数（长度 = `warp_ends`） |
+| `aligned_interlacing[][]` | 第二份矩阵按最佳偏移循环平移后的交织矩阵 |
+
+```bash
+# 设计 2 是设计 1（平纹 4x4）错位一纬的版本
+curl -s -X POST http://localhost:8000/designs/1/compare \
+  -H 'Content-Type: application/json' \
+  -d '{"other_design_id": 2}'
+```
+
+响应（200）：
+
+```json
+{
+  "design_id": 1,
+  "other_design_id": 2,
+  "warp_ends": 4,
+  "weft_picks": 4,
+  "row_offset": 0,
+  "col_offset": 1,
+  "mismatches": 0,
+  "mismatch_ratio": 0.0,
+  "mismatch_cells": [],
+  "row_mismatches": [0, 0, 0, 0],
+  "col_mismatches": [0, 0, 0, 0],
+  "aligned_interlacing": [[1,0,1,0],[0,1,0,1],[1,0,1,0],[0,1,0,1]]
+}
+```
+
+尺寸不一致时（400）：
+
+```json
+{"detail": "interlacing size mismatch: 3x4 vs 4x4 (both designs must have the same weft_picks and warp_ends)"}
+```
+
 ### 拒绝情形（HTTP 400，整份设计不入库）
 
 - 绑综矩阵非矩形（各行长度不一致）或含非 0/1 值；
@@ -325,6 +396,7 @@ app/
 tests/
   test_weave.py               # 核心逻辑单元测试：python3 tests/test_weave.py
   test_api_repeat_period.py   # repeat-period 接口集成测试（TestClient，临时库）
+  test_api_compare.py         # compare 接口集成测试（TestClient，临时库）
 Dockerfile
 docker-compose.yml
 requirements.txt

@@ -160,5 +160,50 @@ class RepeatPeriodOut(BaseModel):
     )
 
 
+class CompareIn(BaseModel):
+    """设计对齐比对请求：指定用于比对的另一份已入库设计。"""
+
+    other_design_id: int = Field(..., description="另一份已入库设计的 ID")
+
+
+class MismatchCellOut(BaseModel):
+    """最佳对齐下取值不一致的一个交织点。"""
+
+    row: int = Field(..., description="不一致单元的纬纱行号")
+    col: int = Field(..., description="不一致单元的经纱列号")
+
+
+class CompareOut(BaseModel):
+    """两份同尺寸设计交织矩阵的最佳循环错位对齐结果。"""
+
+    design_id: int = Field(..., description="基准设计 ID")
+    other_design_id: int = Field(..., description="被循环平移比对的设计 ID")
+    warp_ends: int = Field(..., description="经纱数（两份矩阵的列数）")
+    weft_picks: int = Field(..., description="纬纱数（两份矩阵的行数）")
+    row_offset: int = Field(
+        ..., description="最佳行偏移：第二份矩阵向下循环平移的行数（纬向错位）"
+    )
+    col_offset: int = Field(
+        ..., description="最佳列偏移：第二份矩阵向右循环平移的列数（经向错位）"
+    )
+    mismatches: int = Field(..., description="最佳对齐下的不一致单元数")
+    mismatch_ratio: float = Field(
+        ..., description="不一致单元占比：mismatches / (weft_picks × warp_ends)"
+    )
+    mismatch_cells: list[MismatchCellOut] = Field(
+        ..., description="不一致单元坐标列表（按行、列升序）"
+    )
+    row_mismatches: list[int] = Field(
+        ..., description="按行汇总的不一致单元数（长度 = weft_picks）"
+    )
+    col_mismatches: list[int] = Field(
+        ..., description="按列汇总的不一致单元数（长度 = warp_ends）"
+    )
+    aligned_interlacing: list[list[int]] = Field(
+        ..., description="第二份矩阵按最佳偏移循环平移后的交织矩阵，"
+        "1=经纱在上，0=纬纱在上"
+    )
+
+
 class ErrorOut(BaseModel):
     detail: str

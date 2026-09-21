@@ -56,6 +56,43 @@ class RepeatPeriod:
 
 
 @dataclass
+class MismatchCell:
+    row: int  # 纬纱行号
+    col: int  # 经纱列号
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class AlignmentResult:
+    warp_ends: int                        # 经纱数（两份矩阵的列数）
+    weft_picks: int                       # 纬纱数（两份矩阵的行数）
+    row_offset: int                       # 最佳行偏移（第二份矩阵的纬向循环错位）
+    col_offset: int                       # 最佳列偏移（第二份矩阵的经向循环错位）
+    mismatches: int                       # 最佳对齐下的不一致单元数
+    mismatch_ratio: float                 # 不一致单元占比（mismatches / 总单元数）
+    mismatch_cells: list[MismatchCell]    # 不一致单元坐标（按行、列升序）
+    row_mismatches: list[int]             # 每行不一致单元数（长度 = weft_picks）
+    col_mismatches: list[int]             # 每列不一致单元数（长度 = warp_ends）
+    aligned_interlacing: list[list[int]]  # 按最佳偏移循环平移后的第二份矩阵
+
+    def to_dict(self) -> dict:
+        return {
+            "warp_ends": self.warp_ends,
+            "weft_picks": self.weft_picks,
+            "row_offset": self.row_offset,
+            "col_offset": self.col_offset,
+            "mismatches": self.mismatches,
+            "mismatch_ratio": self.mismatch_ratio,
+            "mismatch_cells": [c.to_dict() for c in self.mismatch_cells],
+            "row_mismatches": self.row_mismatches,
+            "col_mismatches": self.col_mismatches,
+            "aligned_interlacing": self.aligned_interlacing,
+        }
+
+
+@dataclass
 class RepairPlanStep:
     step: int               # 第几步（从 1 开始）
     treadle: int            # 踏板索引（tie_up 行号）
@@ -494,3 +531,66 @@ def search_repair_plans(
         )
     )
     return plans[:limit]
+
+
+def align_matrices(
+    reference: list[list[int]],
+    candidate: list[list[int]],
+) -> AlignmentResult:
+    """将 candidate 与 reference 做循环错位对齐：枚举 candidate 在纬向（行）、
+    经向（列）两个方向的所有循环平移，返回不一致单元最少的对齐结果。
+
+    偏移 (row_offset, col_offset) 表示把 candidate 整体向下、向右循环平移的量：
+    aligned[h][w] = candidate[(h - row_offset) % weft_picks]
+                             [(w - col_offset) % warp_ends]。
+    行偏移取 0..weft_picks-1、列偏移取 0..warp_ends-1 的全部组合逐一比较，
+    不一致单元数最少者胜出；平局按行偏移再列偏移升序（即枚举顺序中最先
+    达到最小值者）。两份矩阵尺寸不一致时抛 DesignError。不修改传入的矩阵。
+    """
+    weft_picks = len(reference)
+    warp_ends = len(reference[0])
+    other_picks = len(candidate)
+    other_ends = len(candidate[0]) if candidate else 0
+    if other_picks != weft_picks or any(len(row) != warp_ends for row in candidate):
+        raise DesignError(
+            f"interlacing size mismatch: {weft_picks}x{warp_ends} vs "
+            f"{other_picks}x{other_ends} (both designs must have the same "
+            "weft_picks and warp_ends)"
+        )
+
+    best: AlignmentResult | None = None
+    for dr in range(weft_picks):
+        for dc in range(warp_ends):
+            cells = [
+                MismatchCell(h, w)
+                for h in range(weft_picks)
+                for w in range(warp_ends)
+                if reference[h][w]
+                != candidate[(h - dr) % weft_picks][(w - dc) % warp_ends]
+            ]
+            # 严格更少才替换：平局保留枚举顺序中先行偏移、再列偏移最小者
+            if best is not None and len(cells) >= best.mismatches:
+                continue
+            row_mismatches = [0] * weft_picks
+            col_mismatches = [0] * warp_ends
+            for cell in cells:
+                row_mismatches[cell.row] += 1
+                col_mismatches[cell.col] += 1
+            best = AlignmentResult(
+                warp_ends=warp_ends,
+                weft_picks=weft_picks,
+                row_offset=dr,
+                col_offset=dc,
+                mismatches=len(cells),
+                mismatch_ratio=len(cells) / (weft_picks * warp_ends),
+                mismatch_cells=cells,
+                row_mismatches=row_mismatches,
+                col_mismatches=col_mismatches,
+                aligned_interlacing=[
+                    [candidate[(h - dr) % weft_picks][(w - dc) % warp_ends]
+                     for w in range(warp_ends)]
+                    for h in range(weft_picks)
+                ],
+            )
+    assert best is not None  # 尺寸非空，至少枚举过偏移 (0, 0)
+    return best

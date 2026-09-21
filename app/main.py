@@ -9,6 +9,8 @@ from fastapi import FastAPI, HTTPException, Query
 from . import db, weave
 from .models import (
     AuditOut,
+    CompareIn,
+    CompareOut,
     DesignIn,
     DesignOut,
     DesignSummary,
@@ -198,3 +200,41 @@ def repair_plans(
         limit=limit,
     )
     return [p.to_dict() for p in plans]
+
+
+@app.post(
+    "/designs/{design_id}/compare",
+    response_model=CompareOut,
+    responses={
+        400: {"model": ErrorOut, "description": "两份设计的交织矩阵尺寸不一致"},
+        404: {"model": ErrorOut, "description": "任一设计不存在"},
+    },
+    tags=["designs"],
+)
+def compare_designs(design_id: int, body: CompareIn) -> dict:
+    """设计对齐比对：读取两份已入库设计并重新生成交织矩阵（要求尺寸一致），
+    枚举第二份矩阵在经、纬两个方向的所有循环错位，取不一致单元最少的对齐
+    结果；平局按行偏移再列偏移升序。返回最佳偏移、错位数量与比例、错位
+    坐标、按行/列汇总及对齐后的矩阵。接口只读计算，不修改任何已存设计。"""
+    stored = db.get_design(design_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail=f"design {design_id} not found")
+    other = db.get_design(body.other_design_id)
+    if other is None:
+        raise HTTPException(
+            status_code=404, detail=f"design {body.other_design_id} not found"
+        )
+    reference = weave.build_interlacing(
+        stored["threading"], stored["tie_up"], stored["treadling"]
+    )
+    candidate = weave.build_interlacing(
+        other["threading"], other["tie_up"], other["treadling"]
+    )
+    try:
+        result = weave.align_matrices(reference, candidate)
+    except weave.DesignError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    out = result.to_dict()
+    out["design_id"] = design_id
+    out["other_design_id"] = body.other_design_id
+    return out
