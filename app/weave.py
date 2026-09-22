@@ -56,6 +56,41 @@ class RepeatPeriod:
 
 
 @dataclass
+class MismatchPoint:
+    row: int           # 错位单元所在纬纱行号
+    col: int           # 错位单元所在经纱列号
+    design_value: int  # 第一份设计交织矩阵在该单元的值
+    other_value: int   # 第二份设计矩阵对齐后在该单元的值
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class Alignment:
+    weft_offset: int                  # 第二份矩阵沿纬向（行）的最佳循环错位量
+    warp_offset: int                  # 第二份矩阵沿经向（列）的最佳循环错位量
+    mismatch_count: int               # 最佳对齐下不一致单元数
+    mismatch_ratio: float             # 不一致单元占比
+    mismatches: list[MismatchPoint]   # 错位坐标（按行、列升序）
+    row_mismatches: list[int]         # 按行汇总：每纬的错位数
+    col_mismatches: list[int]         # 按列汇总：每经的错位数
+    aligned: list[list[int]]          # 最佳对齐后的第二份矩阵
+
+    def to_dict(self) -> dict:
+        return {
+            "weft_offset": self.weft_offset,
+            "warp_offset": self.warp_offset,
+            "mismatch_count": self.mismatch_count,
+            "mismatch_ratio": self.mismatch_ratio,
+            "mismatches": [m.to_dict() for m in self.mismatches],
+            "row_mismatches": self.row_mismatches,
+            "col_mismatches": self.col_mismatches,
+            "aligned": self.aligned,
+        }
+
+
+@dataclass
 class RepairPlanStep:
     step: int               # 第几步（从 1 开始）
     treadle: int            # 踏板索引（tie_up 行号）
@@ -494,3 +529,71 @@ def search_repair_plans(
         )
     )
     return plans[:limit]
+
+
+def _cyclic_shift(
+    matrix: list[list[int]], weft_offset: int, warp_offset: int
+) -> list[list[int]]:
+    """将矩阵沿纬向循环上移 weft_offset 行、沿经向循环左移 warp_offset 列：
+    shifted[h][w] = matrix[(h + weft_offset) % H][(w + warp_offset) % W]。"""
+    picks = len(matrix)
+    ends = len(matrix[0])
+    return [
+        [matrix[(h + weft_offset) % picks][(w + warp_offset) % ends]
+         for w in range(ends)]
+        for h in range(picks)
+    ]
+
+
+def best_alignment(
+    matrix_a: list[list[int]],
+    matrix_b: list[list[int]],
+) -> Alignment:
+    """枚举 matrix_b 在经、纬方向的所有循环错位，返回与 matrix_a 不一致
+    单元最少的对齐结果。
+
+    对齐约定：aligned[h][w] = matrix_b[(h + weft_offset) % H][(w + warp_offset) % W]，
+    即第二份矩阵沿纬向循环上移 weft_offset 行、沿经向循环左移 warp_offset 列后
+    与第一份矩阵逐点比较。两份矩阵尺寸必须一致（同纬同经），否则抛 DesignError。
+    平局按行偏移（weft_offset）再列偏移（warp_offset）升序取先者——按偏移升序
+    枚举且仅在错位严格更少时更新最优即可自然实现。不修改传入矩阵。
+    """
+    if not matrix_a or not matrix_a[0] or not matrix_b or not matrix_b[0]:
+        raise DesignError("interlacing matrices must be non-empty")
+    picks = len(matrix_a)
+    ends = len(matrix_a[0])
+    if len(matrix_b) != picks or len(matrix_b[0]) != ends:
+        raise DesignError(
+            f"interlacing size mismatch: {picks}x{ends} vs "
+            f"{len(matrix_b)}x{len(matrix_b[0])} (weft_picks x warp_ends)"
+        )
+
+    best: Alignment | None = None
+    for weft_offset in range(picks):
+        for warp_offset in range(ends):
+            aligned = _cyclic_shift(matrix_b, weft_offset, warp_offset)
+            mismatches: list[MismatchPoint] = []
+            row_mismatches = [0] * picks
+            col_mismatches = [0] * ends
+            for h in range(picks):
+                for w in range(ends):
+                    if matrix_a[h][w] != aligned[h][w]:
+                        mismatches.append(
+                            MismatchPoint(h, w, matrix_a[h][w], aligned[h][w])
+                        )
+                        row_mismatches[h] += 1
+                        col_mismatches[w] += 1
+            count = len(mismatches)
+            if best is None or count < best.mismatch_count:
+                best = Alignment(
+                    weft_offset=weft_offset,
+                    warp_offset=warp_offset,
+                    mismatch_count=count,
+                    mismatch_ratio=count / (picks * ends),
+                    mismatches=mismatches,
+                    row_mismatches=row_mismatches,
+                    col_mismatches=col_mismatches,
+                    aligned=aligned,
+                )
+    assert best is not None  # 尺寸非空，至少枚举到 (0, 0)
+    return best

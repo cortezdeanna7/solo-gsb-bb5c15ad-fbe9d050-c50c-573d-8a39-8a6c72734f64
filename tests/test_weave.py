@@ -10,6 +10,7 @@ from app.weave import (  # noqa: E402
     DesignError,
     analyze_repeat_period,
     audit_floats,
+    best_alignment,
     build_interlacing,
     repeat_period_of_matrix,
     search_repair_plans,
@@ -412,6 +413,81 @@ def test_repair_plans_limit_and_validation():
     print("  ok: repair plan parameter validation")
 
 
+def test_best_alignment_shift_recovery():
+    # b 为 a 沿纬向循环移 2 行、经向循环移 1 列：b[h][w] = a[(h+2)%3][(w+1)%3]
+    # 对齐约定 aligned[h][w] = b[(h+ro)%H][(w+co)%W]，故最佳偏移为 (1, 2)
+    a = [[1, 0, 1], [0, 1, 1], [1, 0, 0]]
+    b = [[a[(h + 2) % 3][(w + 1) % 3] for w in range(3)] for h in range(3)]
+    result = best_alignment(a, b)
+    check(result.weft_offset == 1 and result.warp_offset == 2,
+          "shifted copy: best offset recovers the cyclic shift")
+    check(result.mismatch_count == 0 and result.mismatch_ratio == 0.0,
+          "shifted copy: zero mismatches")
+    check(result.aligned == a, "shifted copy: aligned matrix equals first matrix")
+    check(result.mismatches == [], "shifted copy: no mismatch points")
+    check(result.row_mismatches == [0, 0, 0]
+          and result.col_mismatches == [0, 0, 0],
+          "shifted copy: zero row/col summaries")
+    check(a == [[1, 0, 1], [0, 1, 1], [1, 0, 0]]
+          and b == [[0, 0, 1], [0, 1, 1], [1, 1, 0]],
+          "input matrices unchanged")
+
+
+def test_best_alignment_mismatch_details():
+    # 仅 (2, 2) 单元不同：最佳对齐为零偏移，恰 1 处错位
+    a = [[1, 0, 1], [0, 1, 1], [1, 1, 0]]
+    c = [[1, 0, 1], [0, 1, 1], [1, 1, 1]]
+    result = best_alignment(a, c)
+    check(result.weft_offset == 0 and result.warp_offset == 0,
+          "single-cell diff: zero offset")
+    check(result.mismatch_count == 1, "single-cell diff: one mismatch")
+    check(abs(result.mismatch_ratio - 1 / 9) < 1e-12,
+          "single-cell diff: ratio 1/9")
+    check(len(result.mismatches) == 1, "single-cell diff: one mismatch point")
+    m = result.mismatches[0]
+    check((m.row, m.col, m.design_value, m.other_value) == (2, 2, 0, 1),
+          "single-cell diff: mismatch coordinate and values")
+    check(result.row_mismatches == [0, 0, 1]
+          and result.col_mismatches == [0, 0, 1],
+          "single-cell diff: row/col summaries")
+    check(result.aligned == c, "single-cell diff: aligned is unshifted second matrix")
+
+
+def test_best_alignment_tie_break():
+    # 行全同：偏移 (0,1) 与 (1,1) 同为 0 错位，按行偏移升序取 (0,1)
+    a = [[1, 0], [1, 0]]
+    b = [[0, 1], [0, 1]]
+    result = best_alignment(a, b)
+    check((result.weft_offset, result.warp_offset) == (0, 1),
+          "row tie broken by smaller weft offset")
+    check(result.mismatch_count == 0, "row tie: zero mismatches")
+    # 单行：偏移 1 与 3 同为 0 错位，按列偏移升序取 1
+    a1 = [[1, 0, 1, 0]]
+    b1 = [[0, 1, 0, 1]]
+    r1 = best_alignment(a1, b1)
+    check((r1.weft_offset, r1.warp_offset) == (0, 1),
+          "column tie broken by smaller warp offset")
+    # 全同常量矩阵：所有偏移平局，取 (0, 0)
+    r2 = best_alignment([[1, 1], [1, 1]], [[1, 1], [1, 1]])
+    check((r2.weft_offset, r2.warp_offset) == (0, 0)
+          and r2.mismatch_count == 0,
+          "constant matrices: offset (0, 0)")
+
+
+def test_best_alignment_dimension_mismatch():
+    for a, b in (
+        ([[1, 0], [0, 1]], [[1, 0, 1], [0, 1, 0]]),   # 列数不同
+        ([[1, 0], [0, 1]], [[1, 0]]),                 # 行数不同
+        ([[1]], []),                                  # 空矩阵
+    ):
+        try:
+            best_alignment(a, b)
+            raise AssertionError(f"{a} vs {b} should be rejected")
+        except DesignError:
+            pass
+    print("  ok: dimension mismatch raises DesignError")
+
+
 def test_validation():
     ok_cases = []
     # 维度不一致：绑综矩阵不是矩形
@@ -472,5 +548,9 @@ if __name__ == "__main__":
     test_repair_plans_two_flips_needed()
     test_repair_plans_state_dedup()
     test_repair_plans_limit_and_validation()
+    test_best_alignment_shift_recovery()
+    test_best_alignment_mismatch_details()
+    test_best_alignment_tie_break()
+    test_best_alignment_dimension_mismatch()
     test_validation()
     print("all tests passed")

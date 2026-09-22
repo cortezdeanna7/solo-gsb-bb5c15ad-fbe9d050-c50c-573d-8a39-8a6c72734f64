@@ -9,6 +9,8 @@ from fastapi import FastAPI, HTTPException, Query
 from . import db, weave
 from .models import (
     AuditOut,
+    DesignCompareIn,
+    DesignCompareOut,
     DesignIn,
     DesignOut,
     DesignSummary,
@@ -174,8 +176,7 @@ def suggest_tie_up(
     responses={404: {"model": ErrorOut, "description": "设计不存在"}},
     tags=["designs"],
 )
-def repair_plans(
-    design_id: int,
+def repair_plans(    design_id: int,
     max_changes: int = Query(
         default=2, ge=1, le=3, description="最多翻转绑综单元的次数（1～3）"
     ),
@@ -198,3 +199,44 @@ def repair_plans(
         limit=limit,
     )
     return [p.to_dict() for p in plans]
+
+
+@app.post(
+    "/designs/{design_id}/compare",
+    response_model=DesignCompareOut,
+    responses={
+        400: {"model": ErrorOut, "description": "两份设计的交织矩阵尺寸不一致"},
+        404: {"model": ErrorOut, "description": "任一设计不存在"},
+    },
+    tags=["designs"],
+)
+def compare_designs(design_id: int, request: DesignCompareIn) -> dict:
+    """设计对齐比对：读取两份已入库设计并重新生成交织矩阵（尺寸必须一致，
+    否则 400），枚举第二份矩阵在经、纬方向的所有循环错位，取不一致单元最少
+    的对齐结果；平局按行偏移再列偏移升序。返回最佳偏移、错位数量与比例、
+    错位坐标、按行/列汇总及对齐后的矩阵。接口只读计算，不改库。"""
+    stored = db.get_design(design_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail=f"design {design_id} not found")
+    other = db.get_design(request.other_design_id)
+    if other is None:
+        raise HTTPException(
+            status_code=404, detail=f"design {request.other_design_id} not found"
+        )
+    matrix_a = weave.build_interlacing(
+        stored["threading"], stored["tie_up"], stored["treadling"]
+    )
+    matrix_b = weave.build_interlacing(
+        other["threading"], other["tie_up"], other["treadling"]
+    )
+    try:
+        result = weave.best_alignment(matrix_a, matrix_b)
+    except weave.DesignError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "design_id": design_id,
+        "other_design_id": request.other_design_id,
+        "warp_ends": stored["warp_ends"],
+        "weft_picks": stored["weft_picks"],
+        **result.to_dict(),
+    }
